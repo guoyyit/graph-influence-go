@@ -79,7 +79,9 @@ func runSelection(ctx context.Context, snap *GraphSnapshot, cfg SelectionConfig,
 	currentSpread := 0.0
 	reg := newBatchRegistry(snap, cfg.Seed)
 	for _, b := range completed {
-		reg.seed(b)
+		if err := reg.seed(b); err != nil {
+			return SelectionResult{}, err
+		}
 	}
 	gain := func(node NodeID) (float64, error) {
 		seeds := append(append([]NodeID(nil), chosen...), node)

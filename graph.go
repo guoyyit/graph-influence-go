@@ -262,6 +262,12 @@ func (s *GraphSnapshot) Edge(from, to NodeID) (Edge, bool) {
 	return Edge{}, false
 }
 
+// computeHash derives the content identity of a snapshot. It is a pure
+// function of the graph content (nodes, edges, weights): the version counter
+// is deliberately excluded so that identical content always yields the same
+// hash, even when no-op mutation sequences (e.g. add followed by remove) only
+// bumped the version. Cache and snapshot-store lookups key on this hash, so
+// content-identical graphs always reuse persisted statistics.
 func computeHash(s *GraphSnapshot) string {
 	h := sha256.New()
 	var buf [16]byte
@@ -272,7 +278,6 @@ func computeHash(s *GraphSnapshot) string {
 		}
 		h.Write(buf[:8])
 	}
-	putUint64(s.version)
 	for _, from := range s.nodes {
 		id := string(from)
 		putUint64(uint64(len(id)))

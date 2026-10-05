@@ -17,14 +17,17 @@ type EstimateConfig struct {
 }
 
 // BatchStats is the aggregate statistics of one deterministic simulation
-// batch. Only sums are retained so memory stays bounded.
+// batch. Only sums are retained so memory stays bounded. GraphHash records
+// the content hash of the graph the batch was simulated on, so statistics
+// computed on different graph content can never be mixed silently.
 type BatchStats struct {
-	Index    int    `json:"index"`
-	SpecKey  string `json:"spec_key"`
-	Position int    `json:"position"`
-	Rounds   int    `json:"rounds"`
-	Sum      int64  `json:"sum"`
-	SumSq    int64  `json:"sum_sq"`
+	Index     int    `json:"index"`
+	SpecKey   string `json:"spec_key"`
+	Position  int    `json:"position"`
+	Rounds    int    `json:"rounds"`
+	Sum       int64  `json:"sum"`
+	SumSq     int64  `json:"sum_sq"`
+	GraphHash string `json:"graph_hash,omitempty"`
 }
 
 // EstimateResult is the influence estimate with a confidence interval.
@@ -58,7 +61,7 @@ func simulateBatch(snap *GraphSnapshot, model ModelConfig, seeds []NodeID,
 	masterSeed int64, index, position, rounds int, specKey string) BatchStats {
 	normalized := uniqueSortedSeeds(seeds)
 	key := rngSeed(masterSeed, index)
-	stats := BatchStats{Index: index, SpecKey: specKey, Position: position, Rounds: rounds}
+	stats := BatchStats{Index: index, SpecKey: specKey, Position: position, Rounds: rounds, GraphHash: snap.Hash()}
 	for r := 0; r < rounds; r++ {
 		influenced := simulateRound(snap, model, normalized, key, r)
 		n := int64(len(influenced))
@@ -135,7 +138,9 @@ func runEstimation(ctx context.Context, snap *GraphSnapshot, cfg EstimateConfig,
 	total := cfg.totalBatches()
 	reg := newBatchRegistry(snap, cfg.Seed)
 	for _, b := range completed {
-		reg.seed(b)
+		if err := reg.seed(b); err != nil {
+			return EstimateResult{}, err
+		}
 	}
 	seeds := uniqueSortedSeeds(cfg.Seeds)
 	all, err := reg.evaluate(ctx, estimationSpec{model: cfg.Model, seeds: seeds}, 0, total, cfg.BatchSize,

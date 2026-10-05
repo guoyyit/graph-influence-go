@@ -27,6 +27,15 @@ var (
 	ErrTaskCancelled         = sentinelError("influence: task cancelled")
 	ErrTaskTerminal          = sentinelError("influence: task already in terminal state")
 	ErrServiceClosed         = sentinelError("influence: service closed")
+	// ErrGraphSnapshotUnavailable reports that the graph content a task was
+	// bound to at submission cannot be restored (the snapshot file is
+	// missing or corrupt and the current graph has different content), so
+	// the task cannot be resumed without risking silently mixed statistics.
+	ErrGraphSnapshotUnavailable = sentinelError("influence: bound graph snapshot unavailable")
+	// ErrGraphStatsMismatch reports that persisted simulation statistics
+	// belong to graph content different from the one the task is bound to.
+	// Such statistics are never reused silently; the task fails instead.
+	ErrGraphStatsMismatch = sentinelError("influence: persisted statistics do not match the bound graph")
 )
 
 type sentinelError string
@@ -65,3 +74,35 @@ func (e *ValueError) Error() string {
 	return fmt.Sprintf("%s: %s=%v", e.Err, e.Field, e.Value)
 }
 func (e *ValueError) Unwrap() error { return e.Err }
+
+// GraphBindingError reports that a task's bound graph content could not be
+// restored during recovery. It always unwraps to
+// ErrGraphSnapshotUnavailable so callers can classify it with errors.Is.
+type GraphBindingError struct {
+	TaskID string
+	Hash   string
+	Err    error
+}
+
+func (e *GraphBindingError) Error() string {
+	if e.Err != nil {
+		return fmt.Sprintf("%s: task %q bound to graph %s: %v", ErrGraphSnapshotUnavailable, e.TaskID, e.Hash, e.Err)
+	}
+	return fmt.Sprintf("%s: task %q bound to graph %s", ErrGraphSnapshotUnavailable, e.TaskID, e.Hash)
+}
+func (e *GraphBindingError) Unwrap() error { return ErrGraphSnapshotUnavailable }
+
+// BatchProvenanceError reports a persisted simulation batch whose recorded
+// graph hash does not match the graph content a task is bound to. It always
+// unwraps to ErrGraphStatsMismatch so callers can classify it with errors.Is.
+type BatchProvenanceError struct {
+	Index int
+	Want  string
+	Got   string
+}
+
+func (e *BatchProvenanceError) Error() string {
+	return fmt.Sprintf("%s: batch %d belongs to graph %q, task is bound to %q",
+		ErrGraphStatsMismatch, e.Index, e.Got, e.Want)
+}
+func (e *BatchProvenanceError) Unwrap() error { return ErrGraphStatsMismatch }

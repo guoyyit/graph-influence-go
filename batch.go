@@ -68,13 +68,21 @@ func newBatchRegistry(snap *GraphSnapshot, masterSeed int64) *batchRegistry {
 	return r
 }
 
-// seed loads a previously persisted batch without recomputation.
-func (r *batchRegistry) seed(b BatchStats) {
+// seed loads a previously persisted batch without recomputation. A batch is
+// reused only when it was provably simulated on the exact graph content this
+// registry is bound to: its recorded graph hash must equal the bound
+// snapshot's content hash. Anything else (foreign, legacy or provenance-free
+// statistics) is rejected with ErrGraphStatsMismatch instead of being mixed
+// in silently.
+func (r *batchRegistry) seed(b BatchStats) error {
 	if b.Rounds <= 0 {
-		return
+		return nil
+	}
+	if b.GraphHash != r.snap.Hash() {
+		return &BatchProvenanceError{Index: b.Index, Want: r.snap.Hash(), Got: b.GraphHash}
 	}
 	if _, exists := r.mu.byIndex[b.Index]; exists {
-		return
+		return nil
 	}
 	r.mu.byIndex[b.Index] = b
 	pos, ok := r.mu.byPos[b.SpecKey]
@@ -86,6 +94,7 @@ func (r *batchRegistry) seed(b BatchStats) {
 	if b.Index+1 > r.mu.counter {
 		r.mu.counter = b.Index + 1
 	}
+	return nil
 }
 
 // evaluate returns all batch statistics for one specification, reusing cached

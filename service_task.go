@@ -16,6 +16,11 @@ type taskHandle struct {
 	selCfg  *SelectionConfig
 	batches []BatchStats
 
+	// snap is the immutable graph snapshot the task is bound to. It is fixed
+	// exactly once — at submission for new tasks, at resume time for
+	// recovered tasks — and never changes afterwards, so a task's result
+	// depends only on that one graph content.
+	snap   *GraphSnapshot
 	ctx    context.Context
 	cancel context.CancelFunc
 	done   chan struct{}
@@ -31,12 +36,14 @@ func (h *taskHandle) snapshot() TaskState {
 }
 
 // runTask executes a recovered or newly submitted task to a terminal state.
+// The task runs strictly on the graph snapshot it was bound to (at submission
+// or at resume); the live graph is never consulted, so concurrent or
+// intervening graph updates cannot perturb the result.
 func (s *Service) runTask(h *taskHandle) {
 	defer s.wg.Done()
 	defer close(h.done)
 
 	s.mu.RLock()
-	snap := s.graph.Snapshot()
 	closed := s.closed
 	s.mu.RUnlock()
 	if closed {
@@ -46,11 +53,16 @@ func (s *Service) runTask(h *taskHandle) {
 	}
 
 	h.mu.Lock()
+	snap := h.snap
 	h.state.Status = StatusRunning
-	h.state.GraphVersion = snap.Version()
-	h.state.GraphHash = snap.Hash()
 	h.state.UpdatedAt = time.Now()
 	h.mu.Unlock()
+	if snap == nil {
+		// submit and ResumePending always bind a snapshot before starting a
+		// task; reaching this point is a programming error, not a user error.
+		h.fail(errors.New("influence: internal error: task started without a bound graph snapshot"), s.store)
+		return
+	}
 
 	var err error
 	if h.estCfg != nil {
@@ -178,9 +190,17 @@ func (s *Service) submit(kind TaskKind, est *EstimateConfig, sel *SelectionConfi
 		}
 	}
 
+	// Persist the bound snapshot before the task record, so a crash can never
+	// leave behind a task whose bound graph content is unrecoverable. The
+	// store is content-addressed: identical graph content is written once.
+	if err := s.store.SaveSnapshot(snap); err != nil {
+		return "", err
+	}
+
 	now := time.Now().UTC()
 	ctx, cancel := context.WithCancel(context.Background())
 	h := &taskHandle{
+		snap:    snap,
 		ctx:     ctx,
 		cancel:  cancel,
 		batches: []BatchStats{},

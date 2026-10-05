@@ -106,6 +106,14 @@ func NewService(dir string) (*Service, error) {
 // explicit so construction (recovery) never starts work before the caller has
 // restored or inspected its graph. Resumed tasks continue from their already
 // persisted batches without recomputing them.
+//
+// Every resumed task is first re-bound to the exact graph content it was
+// submitted against: the bound snapshot is restored from the content
+// addressed snapshot store by the task's recorded graph hash, independent of
+// any graph updates that happened while the process was down. Tasks whose
+// bound content cannot be restored are failed explicitly with
+// ErrGraphSnapshotUnavailable instead of being resumed against a different
+// graph.
 func (s *Service) ResumePending() []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -114,12 +122,46 @@ func (s *Service) ResumePending() []string {
 		if h.state.Status != StatusQueued {
 			continue
 		}
+		snap, err := s.bindSnapshotLocked(h)
+		if err != nil {
+			h.fail(err, s.store)
+			continue
+		}
+		h.mu.Lock()
+		h.snap = snap
+		h.mu.Unlock()
 		ids = append(ids, h.state.ID)
 		s.wg.Add(1)
 		go s.runTask(h)
 	}
 	sort.Strings(ids)
 	return ids
+}
+
+// bindSnapshotLocked restores the immutable graph content a recovered task
+// was bound to at submission. The caller must hold s.mu.
+//
+// The primary source is the content-addressed snapshot store written at
+// submission time. If the snapshot file is missing or corrupt, the live
+// graph is used only when its content hash equals the bound hash exactly
+// (identical content is interchangeable for simulation); the snapshot store
+// is then backfilled so later restarts do not depend on the live graph
+// staying unchanged. Otherwise the binding cannot be honoured and a
+// GraphBindingError is returned.
+func (s *Service) bindSnapshotLocked(h *taskHandle) (*GraphSnapshot, error) {
+	hash := h.state.GraphHash
+	snap, loadErr := s.store.LoadSnapshot(hash)
+	if loadErr == nil {
+		return snap, nil
+	}
+	cur := s.graph.Snapshot()
+	if cur.Hash() != hash {
+		return nil, &GraphBindingError{TaskID: h.state.ID, Hash: hash, Err: loadErr}
+	}
+	if err := s.store.SaveSnapshot(cur); err != nil {
+		return nil, &GraphBindingError{TaskID: h.state.ID, Hash: hash, Err: err}
+	}
+	return cur, nil
 }
 
 // Close stops accepting tasks and releases resources.
