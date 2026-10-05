@@ -17,14 +17,17 @@ type EstimateConfig struct {
 }
 
 // BatchStats is the aggregate statistics of one deterministic simulation
-// batch. Only sums are retained so memory stays bounded.
+// batch. Only sums are retained so memory stays bounded. GraphHash records
+// the content hash of the graph the batch was simulated against, so statistics
+// computed from different graph contents are never silently mixed.
 type BatchStats struct {
-	Index    int    `json:"index"`
-	SpecKey  string `json:"spec_key"`
-	Position int    `json:"position"`
-	Rounds   int    `json:"rounds"`
-	Sum      int64  `json:"sum"`
-	SumSq    int64  `json:"sum_sq"`
+	Index     int    `json:"index"`
+	SpecKey   string `json:"spec_key"`
+	Position  int    `json:"position"`
+	Rounds    int    `json:"rounds"`
+	Sum       int64  `json:"sum"`
+	SumSq     int64  `json:"sum_sq"`
+	GraphHash string `json:"graph_hash,omitempty"`
 }
 
 // EstimateResult is the influence estimate with a confidence interval.
@@ -58,7 +61,7 @@ func simulateBatch(snap *GraphSnapshot, model ModelConfig, seeds []NodeID,
 	masterSeed int64, index, position, rounds int, specKey string) BatchStats {
 	normalized := uniqueSortedSeeds(seeds)
 	key := rngSeed(masterSeed, index)
-	stats := BatchStats{Index: index, SpecKey: specKey, Position: position, Rounds: rounds}
+	stats := BatchStats{Index: index, SpecKey: specKey, Position: position, Rounds: rounds, GraphHash: snap.Hash()}
 	for r := 0; r < rounds; r++ {
 		influenced := simulateRound(snap, model, normalized, key, r)
 		n := int64(len(influenced))
@@ -125,11 +128,28 @@ func aggregate(stats []BatchStats, confidence float64) EstimateResult {
 	return res
 }
 
+// validateBatchBinding ensures every previously persisted batch was simulated
+// against the graph content identified by hash. Batches persisted by versions
+// before content binding was introduced carry no hash and are accepted only
+// under the recovery-time binding rules (see NewService). A task with mixed
+// statistics must fail, never complete.
+func validateBatchBinding(batches []BatchStats, hash string) error {
+	for _, b := range batches {
+		if b.GraphHash != "" && b.GraphHash != hash {
+			return &ValueError{Err: ErrGraphStatsMixed, Field: "batch_index", Value: float64(b.Index)}
+		}
+	}
+	return nil
+}
+
 // runEstimation executes all pending batches until completion, cancellation,
 // or failure. It reports completed batch statistics via progress.
 func runEstimation(ctx context.Context, snap *GraphSnapshot, cfg EstimateConfig,
 	completed []BatchStats, progress func(BatchStats)) (EstimateResult, error) {
 	if err := validateEstimateConfig(snap, cfg); err != nil {
+		return EstimateResult{}, err
+	}
+	if err := validateBatchBinding(completed, snap.Hash()); err != nil {
 		return EstimateResult{}, err
 	}
 	total := cfg.totalBatches()

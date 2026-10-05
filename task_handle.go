@@ -12,10 +12,11 @@ func (h *taskHandle) recordLocked() taskRecord {
 	batches := append([]BatchStats(nil), h.batches...)
 	sort.Slice(batches, func(i, j int) bool { return batches[i].Index < batches[j].Index })
 	return taskRecord{
-		State:       h.state,
-		EstimateCfg: h.estCfg,
-		SelectCfg:   h.selCfg,
-		Batches:     batches,
+		State:         h.state,
+		EstimateCfg:   h.estCfg,
+		SelectCfg:     h.selCfg,
+		Batches:       batches,
+		BoundSnapshot: h.bound,
 	}
 }
 

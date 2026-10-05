@@ -67,6 +67,9 @@ func runSelection(ctx context.Context, snap *GraphSnapshot, cfg SelectionConfig,
 	if err := validateSelectionConfig(snap, cfg); err != nil {
 		return SelectionResult{}, err
 	}
+	if err := validateBatchBinding(completed, snap.Hash()); err != nil {
+		return SelectionResult{}, err
+	}
 
 	candidates := normalizeCandidates(cfg.Candidates)
 	sortNodeIDs(candidates)

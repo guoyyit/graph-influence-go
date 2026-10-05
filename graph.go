@@ -214,7 +214,10 @@ type GraphSnapshot struct {
 // Version returns the graph version of this snapshot.
 func (s *GraphSnapshot) Version() uint64 { return s.version }
 
-// Hash returns the deterministic content hash of this snapshot.
+// Hash returns the deterministic content hash of this snapshot. The hash
+// covers only the graph content (nodes, edges, weights); two snapshots with
+// identical content share the same hash even when their version counters
+// differ, so content-addressed caches survive pure version bumps.
 func (s *GraphSnapshot) Hash() string { return s.hash }
 
 // NodeCount returns the number of nodes.
@@ -272,7 +275,8 @@ func computeHash(s *GraphSnapshot) string {
 		}
 		h.Write(buf[:8])
 	}
-	putUint64(s.version)
+	// The version counter is deliberately excluded: the hash identifies graph
+	// content, not its position in the mutation history.
 	for _, from := range s.nodes {
 		id := string(from)
 		putUint64(uint64(len(id)))

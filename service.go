@@ -55,7 +55,11 @@ type Service struct {
 }
 
 // NewService opens a service backed by dir (created if missing). Graph and
-// unfinished tasks are recovered from dir on startup.
+// unfinished tasks are recovered from dir on startup. Each unfinished task is
+// rebound to the graph snapshot it pinned at submission; tasks whose bound
+// graph content cannot be restored, or whose persisted statistics span
+// different graph contents, are marked failed with a distinguishable reason
+// instead of being resumed against a different graph.
 func NewService(dir string) (*Service, error) {
 	st, err := OpenStore(dir)
 	if err != nil {
@@ -85,6 +89,7 @@ func NewService(dir string) (*Service, error) {
 			estCfg:  rec.EstimateCfg,
 			selCfg:  rec.SelectCfg,
 			batches: rec.Batches,
+			bound:   rec.BoundSnapshot,
 			done:    make(chan struct{}),
 		}
 		if h.batches == nil {
@@ -93,6 +98,15 @@ func NewService(dir string) (*Service, error) {
 		switch h.state.Status {
 		case StatusQueued, StatusRunning:
 			h.state.Status = StatusQueued
+			if err := s.bindRecovered(h); err != nil {
+				// The bound graph content cannot be restored (or the persisted
+				// statistics span multiple graph contents): fail explicitly
+				// instead of silently resuming against a different graph.
+				h.fail(err, s.store)
+				close(h.done)
+				s.tasks[h.state.ID] = h
+				continue
+			}
 			s.tasks[h.state.ID] = h
 		default:
 			close(h.done)
@@ -102,10 +116,63 @@ func NewService(dir string) (*Service, error) {
 	return s, nil
 }
 
+// bindRecovered resolves the graph binding of a recovered non-terminal task.
+// On success the handle pins the bound snapshot and every persisted batch is
+// verified against it. On failure the task cannot be resumed consistently and
+// the caller marks it failed with a distinguishable reason.
+func (s *Service) bindRecovered(h *taskHandle) error {
+	curSnap := s.graph.Snapshot()
+
+	if !h.bound {
+		// Legacy record written before content binding existed: the recorded
+		// graph_version is the version the task last ran against. When the
+		// persisted graph is still at that version, its content is exactly
+		// what the persisted batches were computed from, so binding to it is
+		// consistent; otherwise the bound content is lost.
+		if curSnap.Version() != h.state.GraphVersion {
+			return fmt.Errorf("%w: task %s ran against graph version %d, persisted graph is version %d",
+				ErrGraphBindingLost, h.state.ID, h.state.GraphVersion, curSnap.Version())
+		}
+		if err := s.store.SaveSnapshot(curSnap); err != nil {
+			return err
+		}
+		h.mu.Lock()
+		h.snap = curSnap
+		h.bound = true
+		h.state.GraphHash = curSnap.Hash()
+		rec := h.recordLocked()
+		h.mu.Unlock()
+		if err := s.store.SaveTask(rec); err != nil {
+			return err
+		}
+		return validateBatchBinding(h.batches, curSnap.Hash())
+	}
+
+	snap, err := s.store.LoadSnapshot(h.state.GraphHash)
+	if err != nil {
+		// The bound snapshot file is missing or corrupt. It can only be
+		// repaired when the current graph has exactly the bound content.
+		if curSnap.Hash() != h.state.GraphHash {
+			return fmt.Errorf("%w: task %s bound to graph %s: %v",
+				ErrGraphBindingLost, h.state.ID, h.state.GraphHash, err)
+		}
+		if serr := s.store.SaveSnapshot(curSnap); serr != nil {
+			return serr
+		}
+		snap = curSnap
+	}
+	h.mu.Lock()
+	h.snap = snap
+	h.mu.Unlock()
+	return validateBatchBinding(h.batches, snap.Hash())
+}
+
 // ResumePending resumes all tasks persisted in queued/running state. It is
 // explicit so construction (recovery) never starts work before the caller has
 // restored or inspected its graph. Resumed tasks continue from their already
-// persisted batches without recomputing them.
+// persisted batches without recomputing them, strictly against the graph
+// snapshot each task bound at submission; tasks that failed rebinding during
+// recovery stay failed and are not returned.
 func (s *Service) ResumePending() []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()

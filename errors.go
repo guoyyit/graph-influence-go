@@ -27,6 +27,14 @@ var (
 	ErrTaskCancelled         = sentinelError("influence: task cancelled")
 	ErrTaskTerminal          = sentinelError("influence: task already in terminal state")
 	ErrServiceClosed         = sentinelError("influence: service closed")
+	// ErrGraphBindingLost marks tasks whose bound graph content cannot be
+	// restored at recovery, so a consistent result can no longer be
+	// guaranteed. The task fails explicitly instead of silently reusing
+	// statistics computed against a different graph.
+	ErrGraphBindingLost = sentinelError("influence: bound graph content is no longer available")
+	// ErrGraphStatsMixed marks tasks whose persisted simulation statistics
+	// span more than one graph content. Such tasks are never completed.
+	ErrGraphStatsMixed = sentinelError("influence: task statistics span different graph contents")
 )
 
 type sentinelError string

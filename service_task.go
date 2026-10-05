@@ -3,6 +3,7 @@ package influence
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"time"
 )
@@ -15,6 +16,12 @@ type taskHandle struct {
 	estCfg  *EstimateConfig
 	selCfg  *SelectionConfig
 	batches []BatchStats
+
+	// snap is the immutable graph snapshot the task is bound to. It is fixed
+	// at submission (or resolved once during recovery) and never changes for
+	// the lifetime of the task, so the result depends only on that content.
+	snap  *GraphSnapshot
+	bound bool
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -31,12 +38,14 @@ func (h *taskHandle) snapshot() TaskState {
 }
 
 // runTask executes a recovered or newly submitted task to a terminal state.
+// The task runs strictly against the graph snapshot pinned at submission (or
+// resolved at recovery); the live graph is never consulted, so concurrent or
+// post-crash graph updates cannot perturb the result.
 func (s *Service) runTask(h *taskHandle) {
 	defer s.wg.Done()
 	defer close(h.done)
 
 	s.mu.RLock()
-	snap := s.graph.Snapshot()
 	closed := s.closed
 	s.mu.RUnlock()
 	if closed {
@@ -46,9 +55,17 @@ func (s *Service) runTask(h *taskHandle) {
 	}
 
 	h.mu.Lock()
+	snap := h.snap
+	h.mu.Unlock()
+	if snap == nil {
+		// Defensive: submission and recovery always pin a snapshot. Without
+		// one, consistency cannot be guaranteed, so fail explicitly.
+		h.fail(fmt.Errorf("%w: task %s has no pinned graph snapshot", ErrGraphBindingLost, h.state.ID), s.store)
+		return
+	}
+
+	h.mu.Lock()
 	h.state.Status = StatusRunning
-	h.state.GraphVersion = snap.Version()
-	h.state.GraphHash = snap.Hash()
 	h.state.UpdatedAt = time.Now()
 	h.mu.Unlock()
 
@@ -178,6 +195,13 @@ func (s *Service) submit(kind TaskKind, est *EstimateConfig, sel *SelectionConfi
 		}
 	}
 
+	// Persist the bound snapshot before the task record so the exact graph
+	// content can be restored after a restart, even if the live graph is
+	// modified afterwards. The file is content-addressed and immutable.
+	if err := s.store.SaveSnapshot(snap); err != nil {
+		return "", err
+	}
+
 	now := time.Now().UTC()
 	ctx, cancel := context.WithCancel(context.Background())
 	h := &taskHandle{
@@ -185,6 +209,8 @@ func (s *Service) submit(kind TaskKind, est *EstimateConfig, sel *SelectionConfi
 		cancel:  cancel,
 		batches: []BatchStats{},
 		done:    make(chan struct{}),
+		snap:    snap,
+		bound:   true,
 	}
 	h.state = TaskState{
 		ID:           newTaskID(),

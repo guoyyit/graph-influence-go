@@ -25,7 +25,7 @@ func OpenStore(dir string) (*Store, error) {
 	if dir == "" {
 		return nil, errors.New("influence: store directory must not be empty")
 	}
-	for _, sub := range []string{"", "graphs", "tasks", "batches"} {
+	for _, sub := range []string{"", "graphs", "tasks", "batches", filepath.Join("graphs", "snapshots")} {
 		if err := os.MkdirAll(filepath.Join(dir, sub), 0o755); err != nil {
 			return nil, err
 		}
@@ -35,6 +35,58 @@ func OpenStore(dir string) (*Store, error) {
 
 // Close releases store resources.
 func (s *Store) Close() error { return nil }
+
+// snapshotPath returns the content-addressed path of a bound graph snapshot.
+func snapshotPath(hash string) string {
+	return filepath.Join("graphs", "snapshots", hash+".json")
+}
+
+// SaveSnapshot persists an immutable graph snapshot addressed by its content
+// hash. The write is skipped when the file already exists: content-addressed
+// files are immutable and atomic writes never leave torn files, so an
+// existing file already holds exactly this content.
+func (s *Store) SaveSnapshot(snap *GraphSnapshot) error {
+	rel := snapshotPath(snap.Hash())
+	if _, err := os.Stat(filepath.Join(s.dir, rel)); err == nil {
+		return nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	data := graphData{Version: snap.version, Nodes: snap.Nodes()}
+	for _, from := range snap.nodes {
+		for _, e := range snap.out[from] {
+			data.Edges = append(data.Edges, edgeData{From: e.From, To: e.To, Weight: e.Weight})
+		}
+	}
+	return s.writeJSON(rel, data)
+}
+
+// LoadSnapshot restores the bound graph snapshot stored under hash. The
+// reconstructed content hash is verified against the requested hash so a
+// corrupted or swapped file is reported instead of silently used.
+func (s *Store) LoadSnapshot(hash string) (*GraphSnapshot, error) {
+	var data graphData
+	if err := s.readJSON(snapshotPath(hash), &data); err != nil {
+		return nil, err
+	}
+	g := NewGraph()
+	for _, n := range data.Nodes {
+		if err := g.AddNode(n); err != nil {
+			return nil, fmt.Errorf("influence: corrupt snapshot %s: %w", hash, err)
+		}
+	}
+	for _, e := range data.Edges {
+		if err := g.AddEdge(e.From, e.To, e.Weight); err != nil {
+			return nil, fmt.Errorf("influence: corrupt snapshot %s: %w", hash, err)
+		}
+	}
+	g.version = data.Version
+	snap := g.Snapshot()
+	if snap.Hash() != hash {
+		return nil, fmt.Errorf("influence: snapshot %s content does not match its hash", hash)
+	}
+	return snap, nil
+}
 
 // graphData is the on-disk serialisation of a graph.
 type graphData struct {
@@ -87,11 +139,15 @@ func (s *Store) LoadGraph() (*Graph, error) {
 }
 
 // taskRecord is the on-disk serialisation of a task and its progress.
+// BoundSnapshot records that State.GraphHash is a content hash whose snapshot
+// is persisted under graphs/snapshots/; records written before content
+// binding was introduced lack the flag and are rebound at recovery.
 type taskRecord struct {
-	State       TaskState        `json:"state"`
-	EstimateCfg *EstimateConfig  `json:"estimate_cfg,omitempty"`
-	SelectCfg   *SelectionConfig `json:"select_cfg,omitempty"`
-	Batches     []BatchStats     `json:"batches,omitempty"`
+	State         TaskState        `json:"state"`
+	EstimateCfg   *EstimateConfig  `json:"estimate_cfg,omitempty"`
+	SelectCfg     *SelectionConfig `json:"select_cfg,omitempty"`
+	Batches       []BatchStats     `json:"batches,omitempty"`
+	BoundSnapshot bool             `json:"bound_snapshot,omitempty"`
 }
 
 // SaveTask atomically persists a task record.
